@@ -7,6 +7,7 @@ Unified agent using LiteLLM for all model interactions with minimal MCP support.
 
 import asyncio
 import json
+import os
 import time
 from typing import Any, Dict, List, Optional, Callable
 from pydantic import AnyUrl
@@ -17,11 +18,33 @@ import nest_asyncio
 
 from src.logger import get_logger
 from .base_agent import BaseMCPAgent
-from .mcp import MCPStdioServer, MCPHttpServer
+from .mcp import MCPStdioServer, MCPHttpServer, MultiMCPServer
 
 # Apply nested asyncio support
 nest_asyncio.apply()
 
+# MCPTrim integration: set MCPTRIM_BIN env var to enable transparent proxy compression
+MCPTRIM_BIN = os.environ.get("MCPTRIM_BIN", "")
+# Set MCPTRIM_COMPRESS_SCHEMAS=1 for strip mode (noise removal, zero extra turns)
+MCPTRIM_COMPRESS_SCHEMAS = os.environ.get("MCPTRIM_COMPRESS_SCHEMAS", "") == "1"
+# Set MCPTRIM_LAZY_SCHEMAS=1 for lazy mode (full schema on-demand, more savings but extra turns)
+MCPTRIM_LAZY_SCHEMAS = os.environ.get("MCPTRIM_LAZY_SCHEMAS", "") == "1"
+# Set MCPTRIM_STUB_SCHEMAS=1 for stub mode (name only, rely on training knowledge, zero extra turns)
+MCPTRIM_STUB_SCHEMAS = os.environ.get("MCPTRIM_STUB_SCHEMAS", "") == "1"
+# Set MCPTRIM_OUT to a .jsonl path to record per-call token metrics
+MCPTRIM_OUT = os.environ.get("MCPTRIM_OUT", "")
+# context-mode integration: set CONTEXT_MODE_BIN to path of server.bundle.mjs
+# When set, context-mode runs alongside filesystem giving the agent ctx_execute etc.
+CONTEXT_MODE_BIN = os.environ.get("CONTEXT_MODE_BIN", "")
+# mcp-compressor integration: set MCP_COMPRESSOR_BIN to the mcp-compressor binary path
+# MCP_COMPRESSOR_TOONIFY=1 adds --toonify (TOON format responses)
+# MCP_COMPRESSOR_LEVEL sets --compression-level (max|high|medium|low, default max)
+# Set MCP_COMPRESSOR_BIN to path of mcp-compressor TS cli.js
+# MCP_COMPRESSOR_TOONIFY=1 adds --toonify (TOON format responses)
+# MCP_COMPRESSOR_LEVEL sets --compression-level (high|medium|low, default high)
+MCP_COMPRESSOR_BIN = os.environ.get("MCP_COMPRESSOR_BIN", "")
+MCP_COMPRESSOR_TOONIFY = os.environ.get("MCP_COMPRESSOR_TOONIFY", "") == "1"
+MCP_COMPRESSOR_LEVEL = os.environ.get("MCP_COMPRESSOR_LEVEL", "high")
 # Configure LiteLLM
 litellm.suppress_debug_info = True
 
@@ -1127,14 +1150,41 @@ class MCPMarkAgent(BaseMCPAgent):
             if not test_directory:
                 raise ValueError("Test directory required for filesystem service")
 
-            return MCPStdioServer(
-                command="npx",
-                args=[
-                    "-y",
-                    "@modelcontextprotocol/server-filesystem",
-                    str(test_directory),
-                ],
-            )
+            server_args = ["-y", "@modelcontextprotocol/server-filesystem", str(test_directory)]
+            if MCPTRIM_BIN:
+                trim_args = []
+                if MCPTRIM_STUB_SCHEMAS:
+                    trim_args.append("--stub-schemas")
+                elif MCPTRIM_LAZY_SCHEMAS:
+                    trim_args.append("--lazy-schemas")
+                elif MCPTRIM_COMPRESS_SCHEMAS:
+                    trim_args.append("--compress-schemas")
+                if MCPTRIM_OUT:
+                    trim_args += ["--out", MCPTRIM_OUT]
+                return MCPStdioServer(
+                    command=MCPTRIM_BIN,
+                    args=trim_args + ["--"] + ["npx"] + server_args,
+                )
+            if MCP_COMPRESSOR_BIN:
+                comp_args = ["--compression-level", MCP_COMPRESSOR_LEVEL]
+                if MCP_COMPRESSOR_TOONIFY:
+                    comp_args.append("--toonify")
+                return MCPStdioServer(
+                    command="node",
+                    args=[MCP_COMPRESSOR_BIN] + comp_args + ["--", "npx"] + server_args,
+                )
+
+            fs_server = MCPStdioServer(command="npx", args=server_args)
+
+            if CONTEXT_MODE_BIN:
+                ctx_server = MCPStdioServer(
+                    command="node",
+                    args=[CONTEXT_MODE_BIN],
+                    env={"CONTEXT_MODE_PROJECT_DIR": str(test_directory)},
+                )
+                return MultiMCPServer(fs_server, ctx_server)
+
+            return fs_server
 
         elif self.mcp_service in ["playwright", "playwright_webarena"]:
             browser = self.service_config.get("browser", "chromium")
