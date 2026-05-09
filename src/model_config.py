@@ -181,7 +181,18 @@ class ModelConfig:
             "provider": "zhipu",
             "api_key_var": "OPENROUTER_API_KEY",
             "litellm_input_model_name": "openrouter/z-ai/glm-4.5",
-        }
+        },
+        # Groq models (free tier)
+        "llama-3.3-70b": {
+            "provider": "groq",
+            "api_key_var": "GROQ_API_KEY",
+            "litellm_input_model_name": "groq/llama-3.3-70b-versatile",
+        },
+        "llama-3.1-8b": {
+            "provider": "groq",
+            "api_key_var": "GROQ_API_KEY",
+            "litellm_input_model_name": "groq/llama-3.1-8b-instant",
+        },
     }
 
     def __init__(self, model_name: str):

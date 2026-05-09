@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Callable
@@ -169,14 +170,25 @@ class BaseMCPAgent(ABC):
             return self._create_http_server()
         raise ValueError(f"Unsupported MCP service: {self.mcp_service}")
 
+    def _wrap_with_mcptrim(self, command: str, args: list) -> tuple:
+        """If MCPTRIM_FLAGS is set, wrap the server command with mcptrim."""
+        flags_str = os.environ.get("MCPTRIM_FLAGS", "").strip()
+        if not flags_str:
+            return command, args
+        binary = os.environ.get("MCPTRIM_BINARY", "mcptrim")
+        mcptrim_args = flags_str.split() + ["--"] + [command] + args
+        logger.debug("MCPTrim wrapping: %s %s", binary, " ".join(mcptrim_args))
+        return binary, mcptrim_args
+
     def _create_stdio_server(self) -> MCPStdioServer:
         if self.mcp_service == "notion":
             notion_key = self.service_config.get("notion_key")
             if not notion_key:
                 raise ValueError("Notion API key required")
+            cmd, args = self._wrap_with_mcptrim("npx", ["-y", "@notionhq/notion-mcp-server"])
             return MCPStdioServer(
-                command="npx",
-                args=["-y", "@notionhq/notion-mcp-server"],
+                command=cmd,
+                args=args,
                 env={
                     "OPENAPI_MCP_HEADERS": (
                         '{"Authorization": "Bearer ' + notion_key + '", '
@@ -189,14 +201,11 @@ class BaseMCPAgent(ABC):
             test_directory = self.service_config.get("test_directory")
             if not test_directory:
                 raise ValueError("Test directory required for filesystem service")
-            return MCPStdioServer(
-                command="npx",
-                args=[
-                    "-y",
-                    "@modelcontextprotocol/server-filesystem",
-                    str(test_directory),
-                ],
+            cmd, args = self._wrap_with_mcptrim(
+                "npx",
+                ["-y", "@modelcontextprotocol/server-filesystem", str(test_directory)],
             )
+            return MCPStdioServer(command=cmd, args=args)
 
         if self.mcp_service in ("playwright", "playwright_webarena"):
             browser = self.service_config.get("browser", "chromium")
@@ -204,10 +213,10 @@ class BaseMCPAgent(ABC):
             viewport_width = self.service_config.get("viewport_width", 1280)
             viewport_height = self.service_config.get("viewport_height", 720)
 
-            args = ["-y", "@playwright/mcp@latest"]
+            server_args = ["-y", "@playwright/mcp@latest"]
             if headless:
-                args.append("--headless")
-            args.extend(
+                server_args.append("--headless")
+            server_args.extend(
                 [
                     "--isolated",
                     "--no-sandbox",
@@ -217,7 +226,8 @@ class BaseMCPAgent(ABC):
                     f"{viewport_width},{viewport_height}",
                 ]
             )
-            return MCPStdioServer(command="npx", args=args)
+            cmd, args = self._wrap_with_mcptrim("npx", server_args)
+            return MCPStdioServer(command=cmd, args=args)
 
         if self.mcp_service == "postgres":
             host = self.service_config.get("host", "localhost")
@@ -232,9 +242,12 @@ class BaseMCPAgent(ABC):
             database_url = (
                 f"postgresql://{username}:{password}@{host}:{port}/{database}"
             )
+            cmd, args = self._wrap_with_mcptrim(
+                "pipx", ["run", "postgres-mcp", "--access-mode=unrestricted"]
+            )
             return MCPStdioServer(
-                command="pipx",
-                args=["run", "postgres-mcp", "--access-mode=unrestricted"],
+                command=cmd,
+                args=args,
                 env={"DATABASE_URI": database_url},
             )
 
@@ -243,9 +256,10 @@ class BaseMCPAgent(ABC):
             backend_url = self.service_config.get("backend_url")
             if not all([api_key, backend_url]):
                 raise ValueError("Insforge requires api_key and backend_url")
+            cmd, args = self._wrap_with_mcptrim("npx", ["-y", "@insforge/mcp@dev"])
             return MCPStdioServer(
-                command="npx",
-                args=["-y", "@insforge/mcp@dev"],
+                command=cmd,
+                args=args,
                 env={
                     "INSFORGE_API_KEY": api_key,
                     "INSFORGE_BACKEND_URL": backend_url,
